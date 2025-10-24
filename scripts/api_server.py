@@ -34,7 +34,6 @@ from sqlalchemy import MetaData, Table, update, select, insert
 import uuid
 import shutil
 from sqlalchemy.exc import SQLAlchemyError
-from config import is_production_environment
 
 
 # Initialize Flask app
@@ -56,6 +55,8 @@ CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../config/
 # Ensure output directory exists
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+def is_production_environment() -> bool:
+	return os.getenv("ENVIRONMENT", "development") == "production"
 
 def make_deterministic(seed=0):
     """Set random seeds for reproducibility."""
@@ -534,7 +535,7 @@ def list_designs():
 
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 8000))
+    port = int(os.getenv('PORT', 8080))
     host = os.getenv('HOST', '0.0.0.0')
     
     log.info(f"Starting RFdiffusion API server on {host}:{port}")

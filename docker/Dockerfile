@@ -91,6 +91,6 @@ ENV PORT=8000
 RUN mkdir -p /app/outputs /app/models
 
 # Expose API port
-EXPOSE 8000
+EXPOSE 8080
 
 ENTRYPOINT ["python3.9", "scripts/api_server.py"]
