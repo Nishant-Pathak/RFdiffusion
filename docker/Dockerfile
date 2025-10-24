@@ -74,6 +74,8 @@ RUN apt-get -q update \
   hydra-core==1.3.2 \
   pyrsistent==0.19.3 \
   flask==2.3.3 \
+  sqlalchemy==2.0.24 \
+  psycopg2-binary==2.9.11 \
   flask-cors==4.0.0 \
   /app/RFdiffusion/env/SE3Transformer \
   && pip install --no-cache-dir /app/RFdiffusion --no-deps

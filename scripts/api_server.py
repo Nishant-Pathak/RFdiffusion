@@ -5,12 +5,14 @@ REST API server for RFdiffusion inference.
 This server exposes RFdiffusion functionality via REST API endpoints.
 """
 
+from datetime import datetime
 import os
 import re
 import time
 import pickle
 import logging
 import tempfile
+import traceback
 import uuid
 import glob
 from pathlib import Path
@@ -28,6 +30,11 @@ from hydra.core.global_hydra import GlobalHydra
 
 from rfdiffusion.util import writepdb_multi, writepdb
 from rfdiffusion.inference import utils as iu
+from sqlalchemy import MetaData, Table, update, select, insert
+import uuid
+import shutil
+from sqlalchemy.exc import SQLAlchemyError
+from config import is_production_environment
 
 
 # Initialize Flask app
@@ -65,6 +72,106 @@ def initialize_hydra_config(config_name: str = "base") -> None:
     initialize_config_dir(config_dir=CONFIG_DIR, version_base=None)
 
 
+def get_database_engine():
+	from sqlalchemy import create_engine
+	import os
+
+	database_url = os.getenv("DATABASE_URL", "postgresql://postgres:tomatoA10@localhost:5432/protein_app")
+	if not database_url:
+		log.warning("⚠️  DATABASE_URL environment variable not set. Cannot create database engine.")
+		raise ValueError("DATABASE_URL environment variable not set")
+	
+	try:
+		engine = create_engine(database_url)
+		return engine
+	except Exception as e:
+		log.error(f"❌ Failed to create database engine: {e}")
+		log.error(f"Traceback: {traceback.format_exc()}")
+		raise e
+
+
+def update_step_run_started_at(step_run_id: str, engine):
+	metadata = MetaData()
+	steprun_table = Table('steprun', metadata, autoload_with=engine)
+	
+	with engine.connect() as connection:
+		stmt = (
+			update(steprun_table).
+			where(steprun_table.c.id == step_run_id).
+			values(
+				status='RUNNING',
+				started_at=datetime.utcnow()
+			)
+		)
+		connection.execute(stmt)
+		connection.commit()
+		log.info(f"Updated step run started_at for step run {step_run_id}")
+
+
+def run_interence_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
+    job_id = config_overrides.get("job_id")
+    step_run_id = config_overrides.get("step_run_id")
+    update_step_run_started_at(step_run_id, get_database_engine())
+    try:
+        run_inference(config_overrides)
+        update_database_on_success(step_run_id)
+
+    except Exception as e:
+        log.error(f"Inference job {job_id} failed: {e}", exc_info=True)
+        # Optionally, update the database to mark the step run as failed
+        update_database_on_failure(step_run_id, e)
+        raise e
+
+
+def update_database_on_success(step_run_id: str, destination_path: str):
+	engine = get_database_engine()
+
+	# create_artifact_record(step_run_id, destination_path, engine)
+	# insert_job_result_record(step_run_id, engine)
+	update_step_run_completed(step_run_id, "SUCCESS", engine)
+
+
+
+def update_database_on_failure(step_run_id: str, error: Exception):
+	engine = get_database_engine()
+
+	update_step_run_completed(step_run_id, "FAILED", engine, str(error))
+
+
+def update_step_run_completed(step_run_id: str, status: str, engine, error_message: str = None):
+	metadata = MetaData()
+	steprun_table = Table('steprun', metadata, autoload_with=engine)
+	
+	with engine.connect() as connection:
+		# First, fetch the started_at timestamp
+		select_stmt = (
+			select(steprun_table.c.started_at).
+			where(steprun_table.c.id == step_run_id)
+		)
+		result = connection.execute(select_stmt).fetchone()
+		
+		execution_time = None
+		if result and result[0]:
+			started_at = result[0]
+			execution_time = (datetime.utcnow() - started_at).total_seconds()
+		
+		stmt = (
+			update(steprun_table).
+			where(steprun_table.c.id == step_run_id).
+			where(steprun_table.c.step_name == 'ALPHAFOLD').
+			values(
+				status=status,
+				completed_at=datetime.utcnow(),
+				execution_time=execution_time,
+				error_message=error_message,
+				retry_count=steprun_table.c.retry_count + 1 if status == "FAILED" else steprun_table.c.retry_count
+			)
+		)
+		connection.execute(stmt)
+		connection.commit()
+		log.info(f"Updated step run status to {status} for step run id {step_run_id}")
+
+
 def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run RFdiffusion inference with given configuration.
@@ -77,7 +184,8 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Generate unique job ID
     job_id = config_overrides.get("job_id")
-    
+    step_run_id = config_overrides.get("step_run_id")
+
     # Initialize Hydra
     initialize_hydra_config(config_overrides.get("config_name", "base"))
     
@@ -169,8 +277,11 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         px0_xyz_stack = torch.flip(px0_xyz_stack, [0])
         plddt_stack = torch.stack(plddt_stack)
         
+        result_dir_path = Path(f"{OUTPUT_DIR}/{job_id}")
+        os.makedirs(result_dir_path, exist_ok=True)
+
         # Save outputs
-        os.makedirs(os.path.dirname(out_prefix), exist_ok=True)
+        os.makedirs(Path(f"{result_dir_path}/{out_prefix}"), exist_ok=True)
         final_seq = seq_stack[-1]
         
         # Set glycines for non-motif regions
@@ -211,7 +322,7 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         
         # Write trajectory if requested
         if sampler.inf_conf.get("write_trajectory", False):
-            traj_prefix = os.path.dirname(out_prefix) + "/traj/" + os.path.basename(out_prefix)
+            traj_prefix = os.path.dirname(result_dir_path) + "/" + os.path.dirname(out_prefix) + "/traj/" + os.path.basename(out_prefix)
             os.makedirs(os.path.dirname(traj_prefix), exist_ok=True)
             
             writepdb_multi(
@@ -296,7 +407,7 @@ def handle_pubsub_push():
 
         # Process the message
         # Run inference
-        result = run_inference(data)
+        result = run_interence_wrapper(data)
 
         result["job_id"] = job_id
         result["step_run_id"] = step_run_id
@@ -353,7 +464,7 @@ def inference():
 
         
         # Run inference
-        result = run_inference(config_overrides)
+        result = run_interence_wrapper(config_overrides)
 
         result["job_id"] = job_id
         result["step_run_id"] = step_run_id
