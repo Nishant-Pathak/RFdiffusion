@@ -92,24 +92,27 @@ def get_database_engine():
 
 
 def update_step_run_started_at(step_run_id: str, engine):
-	metadata = MetaData()
-	steprun_table = Table('steprun', metadata, autoload_with=engine)
-	
-	with engine.connect() as connection:
-		stmt = (
-			update(steprun_table).
-			where(steprun_table.c.id == step_run_id).
-			values(
-				status='RUNNING',
-				started_at=datetime.utcnow()
-			)
-		)
-		connection.execute(stmt)
-		connection.commit()
-		log.info(f"Updated step run started_at for step run {step_run_id}")
+    try:
+        metadata = MetaData()
+        steprun_table = Table('steprun', metadata, autoload_with=engine)
+        
+        with engine.connect() as connection:
+            stmt = (
+                update(steprun_table).
+                where(steprun_table.c.id == step_run_id).
+                values(
+                    status='RUNNING',
+                    started_at=datetime.utcnow()
+                )
+            )
+            connection.execute(stmt)
+            connection.commit()
+            log.info(f"Updated step run started_at for step run {step_run_id}")
+    except Exception as e:
+         log.debug(f"❌ Failed to update step run started_at for step run {step_run_id}: {e}")
 
 
-def run_interence_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
+def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     job_id = config_overrides.get("job_id")
     step_run_id = config_overrides.get("step_run_id")
     update_step_run_started_at(step_run_id, get_database_engine())
@@ -124,19 +127,25 @@ def run_interence_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         raise e
 
 
-def update_database_on_success(step_run_id: str, destination_path: str):
-	engine = get_database_engine()
+def update_database_on_success(step_run_id: str, destination_path: str=None):
+    try:
+        engine = get_database_engine()
 
-	# create_artifact_record(step_run_id, destination_path, engine)
-	# insert_job_result_record(step_run_id, engine)
-	update_step_run_completed(step_run_id, "SUCCESS", engine)
+        # create_artifact_record(step_run_id, destination_path, engine)
+        # insert_job_result_record(step_run_id, engine)
+        update_step_run_completed(step_run_id, "SUCCESS", engine)
+    except Exception as e:
+        log.debug(f"❌ Failed to update database on success for step run {step_run_id}: {e}")
 
 
 
 def update_database_on_failure(step_run_id: str, error: Exception):
-	engine = get_database_engine()
+    try:
+        engine = get_database_engine()
 
-	update_step_run_completed(step_run_id, "FAILED", engine, str(error))
+        update_step_run_completed(step_run_id, "FAILED", engine, str(error))
+    except Exception as e:
+        log.debug(f"❌ Failed to update database on failure for step run {step_run_id}: {e}")
 
 
 def update_step_run_completed(step_run_id: str, status: str, engine, error_message: str = None):
@@ -186,6 +195,8 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     # Generate unique job ID
     job_id = config_overrides.get("job_id")
     step_run_id = config_overrides.get("step_run_id")
+    config_overrides.pop("job_id", None)
+    config_overrides.pop("step_run_id", None)
 
     # Initialize Hydra
     initialize_hydra_config(config_overrides.get("config_name", "base"))
@@ -199,15 +210,24 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     # Compose configuration
     conf = compose(config_name=config_overrides.get("config_name", "base"), overrides=overrides)
     
-    # Set output prefix if not provided
+    # Create job-specific output directory with absolute path
+    job_output_dir = os.path.abspath(os.path.join(OUTPUT_DIR, job_id))
+    os.makedirs(job_output_dir, exist_ok=True)
+    
+    # Set output prefix if not provided - always use absolute path
     if "inference.output_prefix" not in config_overrides:
-        conf.inference.output_prefix = os.path.join(OUTPUT_DIR, f"design_{job_id}")
+        conf.inference.output_prefix = os.path.join(job_output_dir, "design")
+    else:
+        # Ensure custom output prefix is also within job directory
+        conf.inference.output_prefix = os.path.join(job_output_dir, os.path.basename(config_overrides["inference.output_prefix"]))
     
     # Set model directory if not provided
     if "inference.model_directory_path" not in config_overrides:
         conf.inference.model_directory_path = MODEL_DIR
     
     log.info(f"Starting inference job {job_id}")
+    log.info(f"Job output directory: {job_output_dir}")
+    log.info(f"Output prefix: {conf.inference.output_prefix}")
     log.info(f"Configuration: {OmegaConf.to_yaml(conf)}")
     
     # Check for deterministic mode
@@ -278,11 +298,7 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         px0_xyz_stack = torch.flip(px0_xyz_stack, [0])
         plddt_stack = torch.stack(plddt_stack)
         
-        result_dir_path = Path(f"{OUTPUT_DIR}/{job_id}")
-        os.makedirs(result_dir_path, exist_ok=True)
-
-        # Save outputs
-        os.makedirs(Path(f"{result_dir_path}/{out_prefix}"), exist_ok=True)
+        # Save outputs - all files go into job_output_dir/{job_id}
         final_seq = seq_stack[-1]
         
         # Set glycines for non-motif regions
@@ -293,7 +309,10 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         bfacts = torch.ones_like(final_seq.squeeze())
         bfacts[torch.where(torch.argmax(seq_init, dim=-1) == 21, True, False)] = 0
         
-        # Write PDB file
+        # Ensure output directory exists
+        os.makedirs(job_output_dir, exist_ok=True)
+        
+        # Write PDB file - use relative path within job directory
         out_pdb = f"{out_prefix}.pdb"
         writepdb(
             out_pdb,
@@ -323,8 +342,9 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         
         # Write trajectory if requested
         if sampler.inf_conf.get("write_trajectory", False):
-            traj_prefix = os.path.dirname(result_dir_path) + "/" + os.path.dirname(out_prefix) + "/traj/" + os.path.basename(out_prefix)
-            os.makedirs(os.path.dirname(traj_prefix), exist_ok=True)
+            traj_dir = os.path.join(job_output_dir, "traj")
+            os.makedirs(traj_dir, exist_ok=True)
+            traj_prefix = os.path.join(traj_dir, os.path.basename(out_prefix))
             
             writepdb_multi(
                 f"{traj_prefix}_Xt-1_traj.pdb",
@@ -408,7 +428,7 @@ def handle_pubsub_push():
 
         # Process the message
         # Run inference
-        result = run_interence_wrapper(data)
+        result = run_interface_wrapper(data)
 
         result["job_id"] = job_id
         result["step_run_id"] = step_run_id
@@ -465,7 +485,7 @@ def inference():
 
         
         # Run inference
-        result = run_interence_wrapper(config_overrides)
+        result = run_interface_wrapper(config_overrides)
 
         result["job_id"] = job_id
         result["step_run_id"] = step_run_id

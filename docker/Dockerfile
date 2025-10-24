@@ -39,8 +39,7 @@
 
 FROM nvcr.io/nvidia/cuda:11.6.2-cudnn8-runtime-ubuntu20.04
 
-COPY . /app/RFdiffusion/
-
+# Install system dependencies (cached layer)
 RUN apt-get -q update \ 
   && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
   git \
@@ -58,34 +57,33 @@ RUN apt-get -q update \
   && update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1 \
   && rm -rf /var/lib/apt/lists/* \
   && apt-get autoremove -y \
-  && apt-get clean \
-  && pip install -q --no-cache-dir \
-  numpy==1.23.5 \
-  && pip install -q --no-cache-dir \
-  torch==1.12.1+cu116 -f https://download.pytorch.org/whl/cu116/torch_stable.html \
-  && pip install -q --no-cache-dir \
-  dgl==1.0.2+cu116 -f https://data.dgl.ai/wheels/cu116/repo.html \
-  && pip install -q --no-cache-dir \
-  e3nn==0.3.3 \
-  wandb==0.12.0 \
-  pynvml==11.0.0 \
-  git+https://github.com/NVIDIA/dllogger#egg=dllogger \
-  decorator==5.1.0 \
-  hydra-core==1.3.2 \
-  pyrsistent==0.19.3 \
-  flask==2.3.3 \
-  sqlalchemy==2.0.24 \
-  psycopg2-binary==2.9.11 \
-  flask-cors==4.0.0 \
-  /app/RFdiffusion/env/SE3Transformer \
-  && pip install --no-cache-dir /app/RFdiffusion --no-deps
+  && apt-get clean
+
+# Copy requirements first (for better caching)
+COPY requirements.txt /tmp/requirements.txt
+
+# Install Python dependencies (cached layer)
+RUN pip install --no-cache-dir -r /tmp/requirements.txt \
+  && pip install --no-cache-dir git+https://github.com/NVIDIA/dllogger#egg=dllogger
+
+# Copy SE3Transformer and install
+COPY env/SE3Transformer /tmp/SE3Transformer
+RUN pip install --no-cache-dir /tmp/SE3Transformer
+
+# Copy application code
+COPY . /app/RFdiffusion/
+
+# Install RFdiffusion
+RUN pip install --no-cache-dir /app/RFdiffusion --no-deps
   
 WORKDIR /app/RFdiffusion
 
 ENV DGLBACKEND="pytorch"
 ENV OUTPUT_DIR="/app/outputs"
 ENV MODEL_DIR="/app/models"
-ENV PORT=8000
+ENV PORT=8080
+ENV GOOGLE_APPLICATION_CREDENTIALS="/app/RFdiffusion/google-conf.json"
+
 
 # Create output directory
 RUN mkdir -p /app/outputs /app/models
