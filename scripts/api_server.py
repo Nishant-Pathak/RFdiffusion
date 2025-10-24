@@ -76,7 +76,7 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary containing results and metadata
     """
     # Generate unique job ID
-    job_id = str(uuid.uuid4())[:8]
+    job_id = config_overrides.get("job_id")
     
     # Initialize Hydra
     initialize_hydra_config(config_overrides.get("config_name", "base"))
@@ -270,8 +270,48 @@ def health_check():
         "model_dir": MODEL_DIR
     })
 
+@app.route('/predict', methods=['POST'])
+def handle_pubsub_push():
+    try:
+        # Get the Pub/Sub message from the request
+        envelope = request.get_json()
+        
+        if not envelope:
+            log.error('No Pub/Sub message received')
+            return 'Bad Request: no Pub/Sub message received', 400
+        
+        pubsub_message = envelope.get('message')
+        log.info(f"Pub/Sub message: {pubsub_message}")
+        if not pubsub_message:
+            log.error('No message field in Pub/Sub envelope')
+            return 'Bad Request: invalid Pub/Sub message format', 400
+        
+        # Decode the message data
+        message_data = log.b64decode(pubsub_message['data']).decode('utf-8')
+        data = log.loads(message_data)
+        log.info(f"Received Pub/Sub message: {data}")
+        
+        job_id = data.get("job_id")
+        step_run_id = data.get("step_run_id")
 
-@app.route('/api/v1/inference', methods=['POST'])
+        # Process the message
+        # Run inference
+        result = run_inference(data)
+
+        result["job_id"] = job_id
+        result["step_run_id"] = step_run_id
+        
+        return jsonify(result), 200
+    except Exception as e:
+        log.error(f"Error processing Pub/Sub message: {e}")
+        # Return 500 to NACK the message (will be retried)
+        return jsonify({
+            'error': str(e),
+            'status': 'FAILED'
+        }), 500
+
+
+@app.route('/rfdiffusion', methods=['POST'])
 def inference():
     """
     Run RFdiffusion inference.
@@ -305,11 +345,18 @@ def inference():
         config_overrides = request.json
         if not config_overrides:
             return jsonify({"error": "No configuration provided"}), 400
-        
         log.info(f"Received inference request: {config_overrides}")
+        
+        job_id = config_overrides.get("job_id")
+        step_run_id = config_overrides.get("step_run_id")
+
+
         
         # Run inference
         result = run_inference(config_overrides)
+
+        result["job_id"] = job_id
+        result["step_run_id"] = step_run_id
         
         return jsonify(result), 200
         
