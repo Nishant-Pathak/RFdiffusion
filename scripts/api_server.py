@@ -122,6 +122,7 @@ def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     error_msg = None
     try:
         result = run_inference(config_overrides)
+        log.debug(f"✅ Inference job {job_id} completed successfully with result: {result}")
         update_database_on_success(step_run_id, job_id)
         return result
     except Exception as e:
@@ -154,7 +155,8 @@ def update_database_on_success(step_run_id: str, job_id: str):
         insert_job_result_record(step_run_id, engine)
         update_step_run_completed(step_run_id, "SUCCESS", engine)
     except Exception as e:
-        log.debug(f"❌ Failed to update database on success for step run {step_run_id}: {e}")
+        log.error(f"❌ Failed to update database on success for step run {step_run_id}: {e}")
+        raise e
 
 
 # insert into result set id=uuid_generate_v4(), step_run_id=step_run_id, created_at=now();
@@ -590,9 +592,22 @@ def handle_pubsub_push():
         # Process the message
         # Run inference
         interface_input = {
-            "config_name": "base",
-             "inference.num_designs": 1
+            "config_name": data.get("config_name", "base"),
+            "inference.num_designs": data.get("num_designs", 1),
         }
+        
+        # Make contigs configurable from the message
+        # If not provided, use None to let RFdiffusion use default behavior
+        if "contigs" in data:
+            interface_input["contigmap.contigs"] = data["contigs"]
+        
+        # Add other optional parameters from the message
+        if "num_designs" in data:
+            interface_input["inference.num_designs"] = data["num_designs"]
+        
+        if "write_trajectory" in data:
+            interface_input["inference.write_trajectory"] = data["write_trajectory"]
+        
         interface_input["pdb_file_path"] = data.get("pdb_file_path")
         interface_input["job_id"] = job_id
         interface_input["step_run_id"] = step_run_id
