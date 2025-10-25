@@ -5,13 +5,14 @@ REST API server for RFdiffusion inference.
 This server exposes RFdiffusion functionality via REST API endpoints.
 """
 
+import base64
 from datetime import datetime
 import os
 import re
 import time
 import pickle
 import logging
-import tempfile
+import json
 import traceback
 import uuid
 import glob
@@ -120,9 +121,9 @@ def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     status = "SUCCESS"
     error_msg = None
     try:
-        run_inference(config_overrides)
+        result = run_inference(config_overrides)
         update_database_on_success(step_run_id, job_id)
-
+        return result
     except Exception as e:
         log.error(f"Inference job {job_id} failed: {e}", exc_info=True)
         # Optionally, update the database to mark the step run as failed
@@ -353,8 +354,11 @@ def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     # Generate unique job ID
     job_id = config_overrides.get("job_id")
     step_run_id = config_overrides.get("step_run_id")
+    pdb_file_path = config_overrides.get("pdb_file_path")
     config_overrides.pop("job_id", None)
     config_overrides.pop("step_run_id", None)
+    config_overrides.pop("pdb_file_path", None)
+    config_overrides['inference.input_pdb'] = pdb_file_path
 
     # Initialize Hydra
     initialize_hydra_config(config_overrides.get("config_name", "base"))
@@ -577,8 +581,8 @@ def handle_pubsub_push():
             return 'Bad Request: invalid Pub/Sub message format', 400
         
         # Decode the message data
-        message_data = log.b64decode(pubsub_message['data']).decode('utf-8')
-        data = log.loads(message_data)
+        message_data = base64.b64decode(pubsub_message['data']).decode('utf-8')
+        data = json.loads(message_data)
         log.info(f"Received Pub/Sub message: {data}")
         
         job_id = data.get("job_id")
@@ -586,7 +590,15 @@ def handle_pubsub_push():
 
         # Process the message
         # Run inference
-        result = run_interface_wrapper(data)
+        interface_input = {
+            "config_name": "base",
+             "inference.num_designs": 1,
+            "contigmap.contigs": ["10-40/A163-181/10-40"],
+        }
+        interface_input["pdb_file_path"] = data.get("pdb_file_path")
+        interface_input["job_id"] = job_id
+        interface_input["step_run_id"] = step_run_id
+        result = run_interface_wrapper(interface_input)
 
         result["job_id"] = job_id
         result["step_run_id"] = step_run_id
