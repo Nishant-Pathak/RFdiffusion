@@ -246,7 +246,7 @@ def create_artifact_record(step_run_id: str, job_id: str, engine):
 					artifact_type = 'DESIGN_TRB'
 				else:
 					mime_type = 'application/octet-stream'
-					artifact_type = 'OTHER'
+					artifact_type = 'RAW_OUTPUT'
 				
 				# Check if artifact already exists for this step_run_id and filename
 				select_stmt = (
@@ -327,7 +327,6 @@ def update_step_run_completed(step_run_id: str, status: str, engine, error_messa
 		stmt = (
 			update(steprun_table).
 			where(steprun_table.c.id == step_run_id).
-			where(steprun_table.c.step_name == 'ALPHAFOLD').
 			values(
 				status=status,
 				completed_at=datetime.utcnow(),
