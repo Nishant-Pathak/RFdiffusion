@@ -591,8 +591,7 @@ def handle_pubsub_push():
         # Run inference
         interface_input = {
             "config_name": "base",
-             "inference.num_designs": 1,
-            "contigmap.contigs": ["10-40/A163-181/10-40"],
+             "inference.num_designs": 1
         }
         interface_input["pdb_file_path"] = data.get("pdb_file_path")
         interface_input["job_id"] = job_id
