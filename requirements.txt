@@ -1,13 +1,17 @@
 # Core dependencies
 numpy==1.23.5
 
-# PyTorch with CUDA 11.6 support
+# PyTorch with CUDA 11.6 support (Linux/Docker)
+# For Mac OS, use: pip install torch==1.12.1
 --find-links https://download.pytorch.org/whl/cu116/torch_stable.html
-torch==1.12.1+cu116
+torch==1.12.1+cu116; sys_platform == 'linux'
+torch==1.12.1; sys_platform == 'darwin'
 
-# DGL with CUDA 11.6 support
+# DGL with CUDA 11.6 support (Linux/Docker)
+# For Mac OS, DGL 1.0.2 is not available, using 1.0.1 instead
 --find-links https://data.dgl.ai/wheels/cu116/repo.html
-dgl==1.0.2+cu116
+dgl==1.0.2+cu116; sys_platform == 'linux'
+dgl==1.0.1; sys_platform == 'darwin'
 
 # Scientific computing
 e3nn==0.3.3
@@ -30,3 +34,6 @@ flask-cors==4.0.0
 # Database
 sqlalchemy==2.0.24
 psycopg2-binary==2.9.11
+
+google-cloud-pubsub==2.23.0
+

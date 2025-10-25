@@ -34,6 +34,7 @@ from sqlalchemy import MetaData, Table, update, select, insert
 import uuid
 import shutil
 from sqlalchemy.exc import SQLAlchemyError
+from google.cloud import pubsub_v1
 
 
 # Initialize Flask app
@@ -116,27 +117,184 @@ def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
     job_id = config_overrides.get("job_id")
     step_run_id = config_overrides.get("step_run_id")
     update_step_run_started_at(step_run_id, get_database_engine())
+    status = "SUCCESS"
+    error_msg = None
     try:
         run_inference(config_overrides)
-        update_database_on_success(step_run_id)
+        update_database_on_success(step_run_id, job_id)
 
     except Exception as e:
         log.error(f"Inference job {job_id} failed: {e}", exc_info=True)
         # Optionally, update the database to mark the step run as failed
         update_database_on_failure(step_run_id, e)
+        status = "FAILED"
+        error_msg = str(e)
         raise e
+    finally:
+        log.info(f"Preparing notification for job {job_id} with status {status}")
+        notification_body = {
+				"job_id": job_id,
+				"status": status,
+				"step_run_id": step_run_id,
+			}
+        if error_msg:
+            notification_body["error_message"] = error_msg  
+        
+        if is_production_environment():
+            step_completed_publisher.publish(notification_body)
+            log.info(f"Published completion notification for job {job_id} with status {status}")
 
 
-def update_database_on_success(step_run_id: str, destination_path: str=None):
+def update_database_on_success(step_run_id: str, job_id: str):
     try:
         engine = get_database_engine()
 
-        # create_artifact_record(step_run_id, destination_path, engine)
-        # insert_job_result_record(step_run_id, engine)
+        create_artifact_record(step_run_id, job_id, engine)
+        insert_job_result_record(step_run_id, engine)
         update_step_run_completed(step_run_id, "SUCCESS", engine)
     except Exception as e:
         log.debug(f"❌ Failed to update database on success for step run {step_run_id}: {e}")
 
+
+# insert into result set id=uuid_generate_v4(), step_run_id=step_run_id, created_at=now();
+def insert_job_result_record(step_run_id: str, engine):
+	# Create fresh metadata to avoid caching issues
+	metadata = MetaData()
+	job_results_table = Table('result', metadata, autoload_with=engine)
+
+	with engine.connect() as connection:
+
+		# check if result already exists for this step_run_id
+		select_stmt = (
+			select(job_results_table.c.id).
+			where(job_results_table.c.step_run_id == step_run_id)
+		)
+		result = connection.execute(select_stmt).fetchone()
+		stmt = None
+		if result:
+			log.info(f"ℹ️  Job result record already exists for step run id {step_run_id}, skipping insertion.")
+			stmt = update(job_results_table).where(job_results_table.c.step_run_id == step_run_id).values(
+				created_at=datetime.utcnow()
+			)
+		else:
+			stmt = insert(job_results_table).values(
+				id=str(uuid.uuid4()),
+				step_run_id=step_run_id,
+				created_at=datetime.utcnow()
+		)
+
+		connection.execute(stmt)
+		connection.commit()
+		log.info(f"✅ Created job result record for step run id {step_run_id}")
+
+def create_artifact_record(step_run_id: str, job_id: str, engine):
+	"""
+	Create artifact records for all design files in the job output directory.
+	Finds all files starting with 'design_' including .pdb, .trb, and trajectory files.
+	
+	Args:
+		step_run_id: The step run ID
+		job_id: The job ID used to construct the output directory path
+		engine: SQLAlchemy database engine
+	"""
+	# Create fresh metadata to avoid caching issues
+	metadata = MetaData()
+	artifacts_table = Table('artifact', metadata, autoload_with=engine)
+	
+	# Construct the job output directory path
+	job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+	
+	if not os.path.exists(job_output_dir):
+		log.warning(f"⚠️  Job output directory does not exist: {job_output_dir}")
+		return
+	
+	# Find all files starting with 'design_'
+	design_files = []
+	
+	# Find design files in the main directory (design_*.pdb, design_*.trb)
+	for pattern in ['design_*.pdb', 'design_*.trb']:
+		design_files.extend(glob.glob(os.path.join(job_output_dir, pattern)))
+	
+	# Find trajectory files in the traj subdirectory
+	traj_dir = os.path.join(job_output_dir, 'traj')
+	if os.path.exists(traj_dir):
+		for pattern in ['design_*_Xt-1_traj.pdb', 'design_*_pX0_traj.pdb']:
+			design_files.extend(glob.glob(os.path.join(traj_dir, pattern)))
+	
+	if not design_files:
+		log.warning(f"⚠️  No design files found in {job_output_dir}")
+		return
+	
+	log.info(f"Found {len(design_files)} design files to create artifacts for")
+	
+	with engine.connect() as connection:
+		for file_path in design_files:
+			try:
+				filename = os.path.basename(file_path)
+				file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+				
+				# Determine mime type and artifact type based on file extension
+				if file_path.endswith('.pdb'):
+					mime_type = 'chemical/x-pdb'
+					if 'traj' in file_path:
+						artifact_type = 'TRAJECTORY_PDB'
+					else:
+						artifact_type = 'DESIGN_PDB'
+				elif file_path.endswith('.trb'):
+					mime_type = 'application/octet-stream'
+					artifact_type = 'DESIGN_TRB'
+				else:
+					mime_type = 'application/octet-stream'
+					artifact_type = 'OTHER'
+				
+				# Check if artifact already exists for this step_run_id and filename
+				select_stmt = (
+					select(artifacts_table.c.id).
+					where(artifacts_table.c.step_run_id == step_run_id).
+					where(artifacts_table.c.filename == filename)
+				)
+				result = connection.execute(select_stmt).fetchone()
+				
+				stmt = None
+				if result:
+					log.info(f"ℹ️  Artifact record already exists for {filename}, updating instead.")
+					stmt = (
+						update(artifacts_table).
+						where(artifacts_table.c.step_run_id == step_run_id).
+						where(artifacts_table.c.filename == filename).
+						values(
+							file_path=file_path,
+							file_size=file_size,
+							mime_type=mime_type,
+							artifact_type=artifact_type,
+							storage_backend='GCS' if is_production_environment() else 'LOCAL',
+							is_public=False,
+							created_at=datetime.utcnow()
+						)
+					)
+					log.info(f"✅ Updated artifact record for {filename}")
+				else:
+					stmt = insert(artifacts_table).values(
+						id=uuid.uuid4(),
+						step_run_id=step_run_id,
+						filename=filename,
+						file_path=file_path,
+						file_size=file_size,
+						mime_type=mime_type,
+						artifact_type=artifact_type,
+						storage_backend='GCS' if is_production_environment() else 'LOCAL',
+						is_public=False,
+						created_at=datetime.utcnow()
+					)
+					log.info(f"✅ Created artifact record for {filename}")
+				
+				connection.execute(stmt)
+			except Exception as e:
+				log.error(f"❌ Failed to create artifact record for {file_path}: {e}")
+				continue
+		
+		connection.commit()
+		log.info(f"✅ Successfully processed {len(design_files)} artifact records for step run {step_run_id}")
 
 
 def update_database_on_failure(step_run_id: str, error: Exception):
@@ -552,6 +710,26 @@ def list_designs():
     except Exception as e:
         log.error(f"Failed to list designs: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+
+class Publisher:
+	def __init__(self, topic_name: str):
+		self.topic = topic_name
+		self.publisher = pubsub_v1.PublisherClient()
+
+	def publish(self, message: dict, **attrs):
+		if not self.topic:
+			raise ValueError("PUBSUB_TOPIC environment variable not set.")
+		import json
+		message = json.dumps(message)
+		data = message.encode("utf-8")
+		future = self.publisher.publish(self.topic, data, **{str(k): str(v) for k, v in attrs.items()})
+		return future.result()
+
+STEP_COMPLETED_TOPIC = 'projects/alphafold-469417/topics/step-completed'
+
+step_completed_publisher = Publisher(STEP_COMPLETED_TOPIC)
 
 
 if __name__ == '__main__':
