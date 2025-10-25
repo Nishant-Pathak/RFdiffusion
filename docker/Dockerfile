@@ -79,14 +79,14 @@ RUN pip install --no-cache-dir /app/RFdiffusion --no-deps
 WORKDIR /app/RFdiffusion
 
 ENV DGLBACKEND="pytorch"
-ENV OUTPUT_DIR="/app/outputs"
+ENV OUTPUT_DIR="/app/results"
 ENV MODEL_DIR="/app/models"
 ENV PORT=8080
 ENV GOOGLE_APPLICATION_CREDENTIALS="/app/RFdiffusion/google-conf.json"
 
 
 # Create output directory
-RUN mkdir -p /app/outputs /app/models
+RUN mkdir -p /app/results /app/models
 
 # Expose API port
 EXPOSE 8080

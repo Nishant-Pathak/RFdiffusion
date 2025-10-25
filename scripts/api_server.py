@@ -48,7 +48,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Global configuration
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/outputs")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/app/results")
 MODEL_DIR = os.getenv("MODEL_DIR", "/app/models")
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../config/inference"))
 
