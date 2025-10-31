@@ -143,6 +143,10 @@ def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
             notification_body["error_message"] = error_msg  
         
         if is_production_environment():
+            if status == "FAILED" and should_skip_failure_notification(step_run_id):
+                notification_body["give_up_retry"] = True
+                return notification_body
+
             step_completed_publisher.publish(notification_body)
             log.info(f"Published completion notification for job {job_id} with status {status}")
 
@@ -340,6 +344,35 @@ def update_step_run_completed(step_run_id: str, status: str, engine, error_messa
 		connection.execute(stmt)
 		connection.commit()
 		log.info(f"Updated step run status to {status} for step run id {step_run_id}")
+
+def should_skip_failure_notification(step_run_id: str) -> bool:
+	"""
+	Check if failure notification should be skipped based on retry count.
+	Returns True if retries are remaining, False if notification should be sent.
+	"""
+	try:
+		engine = get_database_engine()
+		metadata = MetaData()
+		steprun_table = Table('steprun', metadata, autoload_with=engine)
+
+		with engine.connect() as connection:
+			select_stmt = (
+				select(steprun_table.c.retry_count, steprun_table.c.max_retries).
+				where(steprun_table.c.id == step_run_id)
+			)
+			result = connection.execute(select_stmt).fetchone()
+
+			if result:
+				retry_count, max_retries = result
+				if retry_count < max_retries:
+					log.info(f"Skipping failure notification for step_run_id {step_run_id} as retries are remaining ({retry_count}/{max_retries})")
+					return True
+
+			return False
+	except Exception as e:
+		log.error(f"❌ Failed to check retry count: {e}")
+		# On error, don't skip notification (fail safe)
+		return False
 
 
 def run_inference(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -614,9 +647,21 @@ def handle_pubsub_push():
         result = run_interface_wrapper(interface_input)
 
         result["job_id"] = job_id
-        result["step_run_id"] = step_run_id
-        
-        return jsonify(result), 200
+        result["step_run_id"] = step_run_id  
+
+                # Check if processing was successful
+        if result.get('status') == 'SUCCESS':
+            # Return 200 to ACK the message
+            log.info(f"Successfully processed message for job {result.get('job_id')}")
+            return jsonify(result), 200
+        elif 'give_up_retry' in result and result['give_up_retry']:
+            log.debug("All the retry limit exausted")
+            return jsonify({'status': 'FAILED', 'reason': 'Retry Exausted'}), 200
+        else:
+            # Return 500 to NACK the message (will be retried)
+            log.error(f"Failed to process message for job {result.get('job_id')}: {result.get('error_message')}")
+            return jsonify(result), 500
+      
     except Exception as e:
         log.error(f"Error processing Pub/Sub message: {e}")
         # Return 500 to NACK the message (will be retried)
