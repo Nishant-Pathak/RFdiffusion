@@ -94,24 +94,21 @@ def get_database_engine():
 
 
 def update_step_run_started_at(step_run_id: str, engine):
-    try:
-        metadata = MetaData()
-        steprun_table = Table('steprun', metadata, autoload_with=engine)
-        
-        with engine.connect() as connection:
-            stmt = (
-                update(steprun_table).
-                where(steprun_table.c.id == step_run_id).
-                values(
-                    status='RUNNING',
-                    started_at=datetime.utcnow()
-                )
+    metadata = MetaData()
+    steprun_table = Table('steprun', metadata, autoload_with=engine)
+    
+    with engine.connect() as connection:
+        stmt = (
+            update(steprun_table).
+            where(steprun_table.c.id == step_run_id).
+            values(
+                status='RUNNING',
+                started_at=datetime.utcnow()
             )
-            connection.execute(stmt)
-            connection.commit()
-            log.info(f"Updated step run started_at for step run {step_run_id}")
-    except Exception as e:
-         log.debug(f"❌ Failed to update step run started_at for step run {step_run_id}: {e}")
+        )
+        connection.execute(stmt)
+        connection.commit()
+        log.info(f"Updated step run started_at for step run {step_run_id}")
 
 
 def run_interface_wrapper(config_overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -298,19 +295,16 @@ def create_artifact_record(step_run_id: str, job_id: str, engine):
 				connection.execute(stmt)
 			except Exception as e:
 				log.error(f"❌ Failed to create artifact record for {file_path}: {e}")
-				continue
+				raise e
 		
 		connection.commit()
 		log.info(f"✅ Successfully processed {len(design_files)} artifact records for step run {step_run_id}")
 
 
 def update_database_on_failure(step_run_id: str, error: Exception):
-    try:
-        engine = get_database_engine()
+    engine = get_database_engine()
 
-        update_step_run_completed(step_run_id, "FAILED", engine, str(error))
-    except Exception as e:
-        log.debug(f"❌ Failed to update database on failure for step run {step_run_id}: {e}")
+    update_step_run_completed(step_run_id, "FAILED", engine, str(error))
 
 
 def update_step_run_completed(step_run_id: str, status: str, engine, error_message: str = None):
